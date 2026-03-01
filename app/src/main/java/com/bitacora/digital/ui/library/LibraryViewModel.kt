@@ -14,9 +14,20 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import java.time.LocalDate
+import java.time.YearMonth
 import javax.inject.Inject
+
+/**
+ * View mode for the library screen.
+ */
+enum class LibraryViewMode {
+    CALENDAR,
+    LIST
+}
 
 /**
  * ViewModel for the session library screen.
@@ -25,6 +36,17 @@ import javax.inject.Inject
 class LibraryViewModel @Inject constructor(
     private val sessionRepository: SessionRepository
 ) : ViewModel() {
+
+    // View mode state
+    var viewMode by mutableStateOf(LibraryViewMode.CALENDAR)
+        private set
+
+    // Calendar state
+    var currentMonth by mutableStateOf(YearMonth.now())
+        private set
+
+    var selectedDate by mutableStateOf<LocalDate?>(null)
+        private set
 
     // Search and filter state
     var searchQuery by mutableStateOf("")
@@ -71,6 +93,17 @@ class LibraryViewModel @Inject constructor(
             scope = viewModelScope,
             started = SharingStarted.WhileSubscribed(5000),
             initialValue = emptyMap()
+        )
+
+    // Dates that have sessions (for calendar dots)
+    val datesWithSessions: StateFlow<Set<LocalDate>> = sessions
+        .map { sessionList ->
+            sessionList.map { it.createdAt.toLocalDate() }.toSet()
+        }
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(5000),
+            initialValue = emptySet()
         )
 
     /**
@@ -128,6 +161,69 @@ class LibraryViewModel @Inject constructor(
      */
     fun clearError() {
         error = null
+    }
+
+    // MARK: - Calendar Actions
+
+    /**
+     * Toggle between calendar and list view.
+     */
+    fun toggleViewMode() {
+        viewMode = if (viewMode == LibraryViewMode.CALENDAR) {
+            LibraryViewMode.LIST
+        } else {
+            LibraryViewMode.CALENDAR
+        }
+    }
+
+    /**
+     * Go to previous month.
+     */
+    fun goToPreviousMonth() {
+        currentMonth = currentMonth.minusMonths(1)
+    }
+
+    /**
+     * Go to next month.
+     */
+    fun goToNextMonth() {
+        currentMonth = currentMonth.plusMonths(1)
+    }
+
+    /**
+     * Go to current month and select today.
+     */
+    fun goToToday() {
+        currentMonth = YearMonth.now()
+        selectedDate = LocalDate.now()
+    }
+
+    /**
+     * Select a date.
+     */
+    fun selectDate(date: LocalDate?) {
+        selectedDate = if (selectedDate == date) null else date
+    }
+
+    /**
+     * Get sessions for a specific date.
+     */
+    fun getSessionsForDate(date: LocalDate): List<Session> {
+        return sessions.value.filter { it.createdAt.toLocalDate() == date }
+    }
+
+    /**
+     * Check if a date has sessions.
+     */
+    fun hasSessionsOn(date: LocalDate): Boolean {
+        return datesWithSessions.value.contains(date)
+    }
+
+    /**
+     * Get session count for a date.
+     */
+    fun sessionCountOn(date: LocalDate): Int {
+        return sessions.value.count { it.createdAt.toLocalDate() == date }
     }
 
     // MARK: - Private

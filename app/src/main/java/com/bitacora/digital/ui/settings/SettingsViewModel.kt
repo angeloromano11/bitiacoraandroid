@@ -13,6 +13,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.bitacora.digital.service.AIService
 import com.bitacora.digital.service.StorageService
+import com.bitacora.digital.service.providers.AIProviderType
 import com.bitacora.digital.util.Config
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -37,13 +38,19 @@ class SettingsViewModel @Inject constructor(
         private val QUESTION_INTERVAL_KEY = intPreferencesKey(Config.QUESTION_INTERVAL_KEY)
     }
 
-    // API Key state
-    var apiKeyConfigured by mutableStateOf(false)
+    // Provider state
+    var activeProvider by mutableStateOf<AIProviderType?>(null)
+        private set
+    var providerStatuses by mutableStateOf<Map<AIProviderType, Boolean>>(emptyMap())
         private set
     var isValidatingKey by mutableStateOf(false)
         private set
     var validationError by mutableStateOf<String?>(null)
         private set
+    var selectedProviderForSetup by mutableStateOf<AIProviderType?>(null)
+
+    // Legacy compatibility
+    val apiKeyConfigured: Boolean get() = providerStatuses.any { it.value }
 
     // Interview settings
     var autoQuestionsEnabled by mutableStateOf(false)
@@ -68,9 +75,10 @@ class SettingsViewModel @Inject constructor(
      */
     private fun loadSettings() {
         viewModelScope.launch {
-            // Check API key
+            // Initialize AI service and load provider statuses
             aiService.initialize()
-            apiKeyConfigured = aiService.isReady
+            activeProvider = aiService.currentProviderType
+            loadProviderStatuses()
 
             // Load preferences
             val prefs = context.dataStore.data.first()
@@ -80,6 +88,13 @@ class SettingsViewModel @Inject constructor(
             // Load storage info
             refreshStorageInfo()
         }
+    }
+
+    /**
+     * Load provider configuration statuses.
+     */
+    private fun loadProviderStatuses() {
+        providerStatuses = aiService.getProviderStatuses().toMap()
     }
 
     /**
@@ -94,9 +109,26 @@ class SettingsViewModel @Inject constructor(
     }
 
     /**
-     * Save and validate API key.
+     * Select a provider. If configured, switches to it. If not, opens setup.
      */
-    fun saveApiKey(key: String) {
+    fun selectProvider(type: AIProviderType) {
+        if (providerStatuses[type] == true) {
+            // Provider is configured, switch to it
+            viewModelScope.launch {
+                if (aiService.switchProvider(type)) {
+                    activeProvider = type
+                }
+            }
+        } else {
+            // Not configured, need to set up
+            selectedProviderForSetup = type
+        }
+    }
+
+    /**
+     * Save and validate API key for a provider.
+     */
+    fun saveApiKey(key: String, type: AIProviderType) {
         if (key.isBlank()) {
             validationError = "API key cannot be empty"
             return
@@ -107,9 +139,11 @@ class SettingsViewModel @Inject constructor(
 
         viewModelScope.launch {
             try {
-                val isValid = aiService.setApiKey(key)
+                val isValid = aiService.setApiKey(key, type)
                 if (isValid) {
-                    apiKeyConfigured = true
+                    loadProviderStatuses()
+                    activeProvider = aiService.currentProviderType
+                    selectedProviderForSetup = null
                     validationError = null
                 } else {
                     validationError = "Invalid API key"
@@ -123,11 +157,14 @@ class SettingsViewModel @Inject constructor(
     }
 
     /**
-     * Clear API key.
+     * Clear API key for a provider.
      */
-    fun clearApiKey() {
-        aiService.clearApiKey()
-        apiKeyConfigured = false
+    fun clearApiKey(type: AIProviderType) {
+        viewModelScope.launch {
+            aiService.clearApiKey(type)
+            loadProviderStatuses()
+            activeProvider = aiService.currentProviderType
+        }
     }
 
     /**
@@ -173,6 +210,14 @@ class SettingsViewModel @Inject constructor(
      */
     fun clearError() {
         error = null
+        validationError = null
+    }
+
+    /**
+     * Dismiss provider setup sheet.
+     */
+    fun dismissProviderSetup() {
+        selectedProviderForSetup = null
         validationError = null
     }
 }

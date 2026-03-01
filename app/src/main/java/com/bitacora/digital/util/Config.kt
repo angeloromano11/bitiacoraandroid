@@ -37,11 +37,15 @@ object Config {
 
     // Keychain
     const val SECURE_PREFS_NAME = "bitacora_secure_prefs"
-    const val KEYCHAIN_API_KEY = "gemini_api_key"
+    const val KEYCHAIN_API_KEY = "gemini_api_key"  // Legacy, use AIProviderType.keychainKey
 
     // DataStore
     const val PREFERENCES_NAME = "bitacora_preferences"
     const val ONBOARDING_COMPLETE_KEY = "has_onboarded"
     const val AUTO_QUESTIONS_ENABLED_KEY = "auto_questions_enabled"
     const val QUESTION_INTERVAL_KEY = "question_interval"
+
+    // AI Providers
+    const val ACTIVE_PROVIDER_KEY = "active_ai_provider"
+    const val DEFAULT_PROVIDER = "GEMINI"
 }

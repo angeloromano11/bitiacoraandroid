@@ -1,77 +1,141 @@
 package com.bitacora.digital.service
 
+import android.content.Context
+import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.stringPreferencesKey
+import androidx.datastore.preferences.preferencesDataStore
 import com.bitacora.digital.model.InterviewContext
 import com.bitacora.digital.model.InterviewType
 import com.bitacora.digital.model.Message
 import com.bitacora.digital.model.MessageRole
 import com.bitacora.digital.model.PracticeSubcategory
-import com.bitacora.digital.service.api.Content
-import com.bitacora.digital.service.api.GenerateContentRequest
-import com.bitacora.digital.service.api.GenerationConfig
-import com.bitacora.digital.service.api.GeminiApi
-import com.bitacora.digital.service.api.InlineData
-import com.bitacora.digital.service.api.Part
+import com.bitacora.digital.service.providers.AIMessage
+import com.bitacora.digital.service.providers.AIMessageRole
+import com.bitacora.digital.service.providers.AIProvider
+import com.bitacora.digital.service.providers.AIProviderFactory
+import com.bitacora.digital.service.providers.AIProviderType
+import com.bitacora.digital.service.providers.AudioNotSupportedException
 import com.bitacora.digital.util.Config
 import com.bitacora.digital.util.currentTimestamp
+import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
-import okhttp3.OkHttpClient
-import okhttp3.logging.HttpLoggingInterceptor
-import retrofit2.Retrofit
-import retrofit2.converter.gson.GsonConverterFactory
-import java.util.concurrent.TimeUnit
 import javax.inject.Inject
 import javax.inject.Singleton
 
+private val Context.dataStore by preferencesDataStore(name = Config.PREFERENCES_NAME)
+
 /**
- * Gemini API integration for AI-guided interview question generation.
+ * AI Service that orchestrates interview question generation using pluggable providers.
  */
 @Singleton
 class AIService @Inject constructor(
+    @ApplicationContext private val context: Context,
     private val keychainHelper: KeychainHelper
 ) {
-    private var apiKey: String? = null
-    private var context: InterviewContext? = null
-
-    val isInitialized: Boolean get() = apiKey != null
-    val isReady: Boolean get() = apiKey != null
-
-    private val geminiApi: GeminiApi by lazy {
-        val logging = HttpLoggingInterceptor().apply {
-            level = HttpLoggingInterceptor.Level.BODY
-        }
-
-        val client = OkHttpClient.Builder()
-            .addInterceptor(logging)
-            .connectTimeout(Config.API_TIMEOUT_SECONDS, TimeUnit.SECONDS)
-            .readTimeout(Config.API_TIMEOUT_SECONDS, TimeUnit.SECONDS)
-            .build()
-
-        Retrofit.Builder()
-            .baseUrl(Config.GEMINI_API_BASE_URL)
-            .client(client)
-            .addConverterFactory(GsonConverterFactory.create())
-            .build()
-            .create(GeminiApi::class.java)
+    companion object {
+        private val ACTIVE_PROVIDER_PREF = stringPreferencesKey(Config.ACTIVE_PROVIDER_KEY)
     }
 
+    private var currentProvider: AIProvider? = null
+    private var activeProviderType: AIProviderType? = null
+    private var interviewContext: InterviewContext? = null
+
+    val isInitialized: Boolean get() = currentProvider != null
+    val isReady: Boolean get() = currentProvider != null
+    val currentProviderType: AIProviderType? get() = activeProviderType
+
     /**
-     * Load API key from secure storage.
+     * Check if the current provider supports native audio input.
+     */
+    val supportsAudio: Boolean get() = currentProvider?.supportsAudio == true
+
+    /**
+     * Load the active provider and its API key from storage.
      */
     suspend fun initialize() {
         withContext(Dispatchers.IO) {
-            apiKey = keychainHelper.load(Config.KEYCHAIN_API_KEY)
+            // Load active provider type from preferences
+            val prefs = context.dataStore.data.first()
+            val providerString = prefs[ACTIVE_PROVIDER_PREF] ?: Config.DEFAULT_PROVIDER
+            val providerType = AIProviderType.fromString(providerString) ?: AIProviderType.GEMINI
+
+            // Try to load API key for this provider
+            val key = keychainHelper.load(providerType.keychainKey)
+            if (key != null) {
+                setProvider(providerType, key)
+            } else {
+                // Try legacy key location for Gemini
+                if (providerType == AIProviderType.GEMINI) {
+                    val legacyKey = keychainHelper.load(Config.KEYCHAIN_API_KEY)
+                    if (legacyKey != null) {
+                        setProvider(AIProviderType.GEMINI, legacyKey)
+                    }
+                }
+            }
+        }
+    }
+
+    // MARK: - Provider Management
+
+    /**
+     * Get list of all available providers with their configuration status.
+     */
+    fun getProviderStatuses(): List<Pair<AIProviderType, Boolean>> {
+        return AIProviderType.entries.map { type ->
+            val hasKey = keychainHelper.load(type.keychainKey) != null
+            type to hasKey
         }
     }
 
     /**
-     * Validate and save API key.
+     * Check if a specific provider is configured.
      */
-    suspend fun setApiKey(key: String): Boolean {
+    fun isProviderConfigured(type: AIProviderType): Boolean {
+        return keychainHelper.load(type.keychainKey) != null
+    }
+
+    /**
+     * Set the active provider with its API key.
+     */
+    private fun setProvider(type: AIProviderType, apiKey: String) {
+        activeProviderType = type
+        currentProvider = AIProviderFactory.create(type, apiKey)
+    }
+
+    /**
+     * Switch to a different configured provider.
+     */
+    suspend fun switchProvider(type: AIProviderType): Boolean {
         return withContext(Dispatchers.IO) {
-            if (validateApiKey(key)) {
-                keychainHelper.save(Config.KEYCHAIN_API_KEY, key)
-                apiKey = key
+            val apiKey = keychainHelper.load(type.keychainKey) ?: return@withContext false
+            setProvider(type, apiKey)
+
+            // Save active provider preference
+            context.dataStore.edit { prefs ->
+                prefs[ACTIVE_PROVIDER_PREF] = type.name
+            }
+            true
+        }
+    }
+
+    /**
+     * Validate and save API key for a provider.
+     */
+    suspend fun setApiKey(key: String, type: AIProviderType): Boolean {
+        return withContext(Dispatchers.IO) {
+            val tempProvider = AIProviderFactory.create(type, key)
+            if (tempProvider.validateApiKey(key)) {
+                keychainHelper.save(type.keychainKey, key)
+
+                // If this is the first configured provider or we're updating current, make it active
+                if (currentProvider == null || activeProviderType == type) {
+                    setProvider(type, key)
+                    context.dataStore.edit { prefs ->
+                        prefs[ACTIVE_PROVIDER_PREF] = type.name
+                    }
+                }
                 true
             } else {
                 false
@@ -80,30 +144,44 @@ class AIService @Inject constructor(
     }
 
     /**
-     * Clear API key from storage.
+     * Clear API key for a specific provider.
      */
-    fun clearApiKey() {
-        keychainHelper.delete(Config.KEYCHAIN_API_KEY)
-        apiKey = null
+    suspend fun clearApiKey(type: AIProviderType) {
+        withContext(Dispatchers.IO) {
+            keychainHelper.delete(type.keychainKey)
+
+            // If we cleared the active provider, try to switch to another
+            if (activeProviderType == type) {
+                currentProvider = null
+                activeProviderType = null
+
+                // Try to find another configured provider
+                for (otherType in AIProviderType.entries) {
+                    if (otherType != type && switchProvider(otherType)) {
+                        break
+                    }
+                }
+            }
+        }
     }
 
     /**
-     * Test an API key with a minimal request.
+     * Validate an API key for a specific provider.
      */
-    suspend fun validateApiKey(key: String): Boolean {
+    suspend fun validateApiKey(key: String, type: AIProviderType): Boolean {
         return withContext(Dispatchers.IO) {
-            try {
-                val request = GenerateContentRequest(
-                    contents = listOf(Content(parts = listOf(Part(text = "Hi")))),
-                    generationConfig = GenerationConfig(maxOutputTokens = 5)
-                )
-                geminiApi.generateContent(key, request)
-                true
-            } catch (e: Exception) {
-                // Check if it's a rate limit (key is valid but rate limited)
-                e.message?.contains("429") == true
-            }
+            val tempProvider = AIProviderFactory.create(type, key)
+            tempProvider.validateApiKey(key)
         }
+    }
+
+    // Legacy compatibility
+    suspend fun setApiKey(key: String): Boolean = setApiKey(key, AIProviderType.GEMINI)
+    fun clearApiKey() {
+        keychainHelper.delete(Config.KEYCHAIN_API_KEY)
+        AIProviderType.entries.forEach { keychainHelper.delete(it.keychainKey) }
+        currentProvider = null
+        activeProviderType = null
     }
 
     // MARK: - Interview Lifecycle
@@ -117,7 +195,7 @@ class AIService @Inject constructor(
         userName: String = "",
         subcategory: PracticeSubcategory? = null
     ): String {
-        context = InterviewContext(
+        interviewContext = InterviewContext(
             sessionId = sessionId,
             userName = userName,
             interviewType = type,
@@ -126,8 +204,8 @@ class AIService @Inject constructor(
         )
 
         val opening = getOpeningQuestion(type, subcategory, userName)
-        context?.questionsAsked?.add(opening)
-        context?.messages?.add(
+        interviewContext?.questionsAsked?.add(opening)
+        interviewContext?.messages?.add(
             Message(
                 role = MessageRole.ASSISTANT,
                 content = opening,
@@ -142,33 +220,23 @@ class AIService @Inject constructor(
      * Generate a follow-up question from the user's text response.
      */
     suspend fun generateFollowUp(text: String): String {
-        val key = apiKey ?: return fallbackQuestion()
-        val ctx = context ?: return fallbackQuestion()
+        val provider = currentProvider ?: return fallbackQuestion()
+        val ctx = interviewContext ?: return fallbackQuestion()
 
         return withContext(Dispatchers.IO) {
             try {
                 val systemPrompt = getSystemPrompt(ctx.interviewType, ctx.subcategory)
-                val history = formatConversationHistory()
-                val prompt = """
-                    $systemPrompt
+                val history = buildConversationHistory()
 
-                    Conversation so far:
-                    $history
+                val question = provider.generateResponse(systemPrompt, history, text)
 
-                    User's response: $text
-
-                    Generate the next question:
-                """.trimIndent()
-
-                val question = callGeminiAPI(key, prompt)
-
-                context?.messages?.add(
+                interviewContext?.messages?.add(
                     Message(role = MessageRole.USER, content = text, timestamp = currentTimestamp())
                 )
-                context?.messages?.add(
+                interviewContext?.messages?.add(
                     Message(role = MessageRole.ASSISTANT, content = question, timestamp = currentTimestamp())
                 )
-                context?.questionsAsked?.add(question)
+                interviewContext?.questionsAsked?.add(question)
 
                 question
             } catch (e: Exception) {
@@ -181,33 +249,32 @@ class AIService @Inject constructor(
      * Generate a follow-up question from audio data (base64 WAV).
      */
     suspend fun generateFollowUpFromAudio(audioBase64: String): String {
-        val key = apiKey ?: return fallbackQuestion()
-        val ctx = context ?: return fallbackQuestion()
+        val provider = currentProvider ?: return fallbackQuestion()
+        val ctx = interviewContext ?: return fallbackQuestion()
 
         return withContext(Dispatchers.IO) {
             try {
+                if (!provider.supportsAudio) {
+                    throw AudioNotSupportedException(provider.providerType)
+                }
+
                 val systemPrompt = getSystemPrompt(ctx.interviewType, ctx.subcategory)
-                val history = formatConversationHistory()
-                val prompt = """
-                    $systemPrompt
+                val history = buildConversationHistory()
 
-                    Conversation so far:
-                    $history
+                val question = provider.generateResponseFromAudio(systemPrompt, history, audioBase64)
 
-                    Generate the next question based on the user's audio response:
-                """.trimIndent()
-
-                val question = callGeminiAPI(key, prompt, audioBase64)
-
-                context?.messages?.add(
+                interviewContext?.messages?.add(
                     Message(role = MessageRole.USER, content = "[Audio response]", timestamp = currentTimestamp())
                 )
-                context?.messages?.add(
+                interviewContext?.messages?.add(
                     Message(role = MessageRole.ASSISTANT, content = question, timestamp = currentTimestamp())
                 )
-                context?.questionsAsked?.add(question)
+                interviewContext?.questionsAsked?.add(question)
 
                 question
+            } catch (e: AudioNotSupportedException) {
+                // For non-audio providers, caller should use speech-to-text first
+                throw e
             } catch (e: Exception) {
                 fallbackQuestion()
             }
@@ -215,51 +282,37 @@ class AIService @Inject constructor(
     }
 
     /**
+     * Generate a follow-up using text fallback for non-audio providers.
+     */
+    suspend fun generateFollowUpWithTextFallback(transcribedText: String): String {
+        return generateFollowUp(transcribedText)
+    }
+
+    /**
      * End the current interview and return a closing message.
      */
     fun endInterview(): String {
-        val ctx = context ?: return "Thank you for sharing."
+        val ctx = interviewContext ?: return "Thank you for sharing."
         val closing = getClosingMessage(ctx.interviewType)
-        context = null
+        interviewContext = null
         return closing
     }
 
     /**
      * Get the number of questions asked in the current session.
      */
-    val questionsCount: Int get() = context?.questionsAsked?.size ?: 0
+    val questionsCount: Int get() = interviewContext?.questionsAsked?.size ?: 0
 
-    // MARK: - Private: API Call
+    // MARK: - Private: Conversation History
 
-    private suspend fun callGeminiAPI(
-        apiKey: String,
-        prompt: String,
-        audioBase64: String? = null
-    ): String {
-        val parts = mutableListOf<Part>()
-        parts.add(Part(text = prompt))
-
-        audioBase64?.let {
-            parts.add(Part(inlineData = InlineData(mimeType = "audio/wav", data = it)))
-        }
-
-        val request = GenerateContentRequest(
-            contents = listOf(Content(parts = parts)),
-            generationConfig = GenerationConfig(
-                temperature = Config.GENERATION_TEMPERATURE,
-                topP = Config.GENERATION_TOP_P,
-                topK = Config.GENERATION_TOP_K,
-                maxOutputTokens = Config.GENERATION_MAX_OUTPUT_TOKENS
+    private fun buildConversationHistory(): List<AIMessage> {
+        val ctx = interviewContext ?: return emptyList()
+        return ctx.messages.map { msg ->
+            AIMessage(
+                role = if (msg.role == MessageRole.ASSISTANT) AIMessageRole.ASSISTANT else AIMessageRole.USER,
+                content = msg.content
             )
-        )
-
-        val response = geminiApi.generateContent(apiKey, request)
-
-        val text = response.candidates?.firstOrNull()
-            ?.content?.parts?.firstOrNull()
-            ?.text
-
-        return text?.trim() ?: throw Exception("No content in response")
+        }
     }
 
     // MARK: - Private: Prompts
@@ -314,14 +367,6 @@ class AIService @Inject constructor(
             InterviewType.WILL -> "Thank you for these heartfelt messages. They will be treasured."
             InterviewType.EXPERIENCE -> "Thank you for sharing your story. It was a pleasure to hear."
             InterviewType.PRACTICE -> "Great practice session! Keep up the good work."
-        }
-    }
-
-    private fun formatConversationHistory(): String {
-        val ctx = context ?: return ""
-        return ctx.messages.joinToString("\n") { msg ->
-            val role = if (msg.role == MessageRole.ASSISTANT) "Interviewer" else "User"
-            "$role: ${msg.content}"
         }
     }
 

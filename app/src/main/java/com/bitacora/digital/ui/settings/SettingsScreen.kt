@@ -1,5 +1,7 @@
 package com.bitacora.digital.ui.settings
 
+import android.content.Intent
+import android.net.Uri
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -12,29 +14,43 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.Key
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.QuestionAnswer
 import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material.icons.filled.Timer
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -45,21 +61,28 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
+import com.bitacora.digital.service.providers.AIProviderType
 import com.bitacora.digital.util.Config
 
 /**
- * Settings screen with API key, interview settings, and storage management.
+ * Settings screen with AI provider selection, interview settings, and storage management.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(
-    onApiKeySetupClick: () -> Unit,
+    onApiKeySetupClick: () -> Unit = {},
     viewModel: SettingsViewModel = hiltViewModel()
 ) {
     var showClearCacheDialog by remember { mutableStateOf(false) }
-    var showClearApiKeyDialog by remember { mutableStateOf(false) }
+    var providerToDelete by remember { mutableStateOf<AIProviderType?>(null) }
+
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
     Column(
         modifier = Modifier
@@ -82,13 +105,30 @@ fun SettingsScreen(
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(24.dp)
         ) {
-            // AI Configuration Section
-            SettingsSection(title = "AI Configuration") {
-                ApiKeyRow(
-                    isConfigured = viewModel.apiKeyConfigured,
-                    onAddClick = onApiKeySetupClick,
-                    onClearClick = { showClearApiKeyDialog = true }
-                )
+            // AI Provider Section
+            SettingsSection(title = "AI Provider") {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    AIProviderType.entries.forEach { provider ->
+                        ProviderRow(
+                            provider = provider,
+                            isActive = viewModel.activeProvider == provider,
+                            isConfigured = viewModel.providerStatuses[provider] == true,
+                            onSelect = { viewModel.selectProvider(provider) },
+                            onConfigure = { viewModel.selectedProviderForSetup = provider },
+                            onClear = { providerToDelete = provider }
+                        )
+                    }
+                }
+
+                // Audio support note
+                if (viewModel.activeProvider != null && viewModel.activeProvider != AIProviderType.GEMINI) {
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Text(
+                        text = "Audio-based questions use device speech recognition with this provider.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color(0xFFFF9800)
+                    )
+                }
             }
 
             // Interview Settings Section
@@ -156,6 +196,23 @@ fun SettingsScreen(
         }
     }
 
+    // Provider Setup Bottom Sheet
+    viewModel.selectedProviderForSetup?.let { provider ->
+        ModalBottomSheet(
+            onDismissRequest = { viewModel.dismissProviderSetup() },
+            sheetState = sheetState,
+            containerColor = Color(0xFF1A1A1A)
+        ) {
+            ProviderSetupSheet(
+                provider = provider,
+                isValidating = viewModel.isValidatingKey,
+                error = viewModel.validationError,
+                onSave = { key -> viewModel.saveApiKey(key, provider) },
+                onDismiss = { viewModel.dismissProviderSetup() }
+            )
+        }
+    }
+
     // Clear Cache Dialog
     if (showClearCacheDialog) {
         AlertDialog(
@@ -181,23 +238,23 @@ fun SettingsScreen(
     }
 
     // Clear API Key Dialog
-    if (showClearApiKeyDialog) {
+    providerToDelete?.let { provider ->
         AlertDialog(
-            onDismissRequest = { showClearApiKeyDialog = false },
+            onDismissRequest = { providerToDelete = null },
             title = { Text("Remove API Key?") },
-            text = { Text("AI-guided interviews will be disabled until you add a new key.") },
+            text = { Text("Remove the API key for ${provider.displayName}? You can add it again later.") },
             confirmButton = {
                 TextButton(
                     onClick = {
-                        viewModel.clearApiKey()
-                        showClearApiKeyDialog = false
+                        viewModel.clearApiKey(provider)
+                        providerToDelete = null
                     }
                 ) {
                     Text("Remove", color = MaterialTheme.colorScheme.error)
                 }
             },
             dismissButton = {
-                TextButton(onClick = { showClearApiKeyDialog = false }) {
+                TextButton(onClick = { providerToDelete = null }) {
                     Text("Cancel")
                 }
             }
@@ -236,64 +293,247 @@ private fun SettingsSection(
 }
 
 /**
- * API key configuration row.
+ * Provider selection row.
  */
 @Composable
-private fun ApiKeyRow(
+private fun ProviderRow(
+    provider: AIProviderType,
+    isActive: Boolean,
     isConfigured: Boolean,
-    onAddClick: () -> Unit,
-    onClearClick: () -> Unit
+    onSelect: () -> Unit,
+    onConfigure: () -> Unit,
+    onClear: () -> Unit
 ) {
+    var showMenu by remember { mutableStateOf(false) }
+
     Row(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(8.dp))
+            .background(if (isActive) MaterialTheme.colorScheme.primary.copy(alpha = 0.15f) else Color.Transparent)
+            .clickable { onSelect() }
+            .padding(12.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
         Row(
             horizontalArrangement = Arrangement.spacedBy(12.dp),
-            verticalAlignment = Alignment.CenterVertically
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.weight(1f)
         ) {
-            Icon(
-                imageVector = Icons.Default.Key,
-                contentDescription = null,
-                tint = if (isConfigured) MaterialTheme.colorScheme.primary else Color.Gray,
-                modifier = Modifier.size(24.dp)
+            RadioButton(
+                selected = isActive,
+                onClick = { onSelect() }
             )
 
             Column {
-                Text(
-                    text = "Gemini API Key",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = Color.White
-                )
-                Text(
-                    text = if (isConfigured) "Configured" else "Not configured",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = if (isConfigured) Color(0xFF4CAF50) else Color(0xFFFF9800)
-                )
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = provider.displayName,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = Color.White
+                    )
+                }
+
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = if (isConfigured) "Configured" else "Not configured",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (isConfigured) Color(0xFF4CAF50) else Color(0xFFFF9800)
+                    )
+
+                    if (provider.supportsAudio) {
+                        Text(
+                            text = "Audio",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Color.Gray
+                        )
+                    }
+                }
             }
         }
 
         if (isConfigured) {
-            TextButton(onClick = onClearClick) {
-                Text("Remove", color = MaterialTheme.colorScheme.error)
+            Box {
+                IconButton(onClick = { showMenu = true }) {
+                    Icon(
+                        imageVector = Icons.Default.MoreVert,
+                        contentDescription = "More options",
+                        tint = Color.Gray
+                    )
+                }
+
+                DropdownMenu(
+                    expanded = showMenu,
+                    onDismissRequest = { showMenu = false }
+                ) {
+                    DropdownMenuItem(
+                        text = { Text("Update Key") },
+                        onClick = {
+                            showMenu = false
+                            onConfigure()
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Remove Key", color = MaterialTheme.colorScheme.error) },
+                        onClick = {
+                            showMenu = false
+                            onClear()
+                        }
+                    )
+                }
             }
         } else {
-            Button(
-                onClick = onAddClick,
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = MaterialTheme.colorScheme.primary
-                )
-            ) {
-                Icon(
-                    imageVector = Icons.Default.Add,
-                    contentDescription = null,
-                    modifier = Modifier.size(18.dp)
-                )
-                Spacer(modifier = Modifier.size(4.dp))
-                Text("Add")
+            TextButton(onClick = onConfigure) {
+                Text("Setup")
             }
         }
+    }
+}
+
+/**
+ * Provider API key setup sheet.
+ */
+@Composable
+private fun ProviderSetupSheet(
+    provider: AIProviderType,
+    isValidating: Boolean,
+    error: String?,
+    onSave: (String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var apiKey by remember { mutableStateOf("") }
+    var showKey by remember { mutableStateOf(false) }
+    val context = LocalContext.current
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(24.dp),
+        verticalArrangement = Arrangement.spacedBy(20.dp)
+    ) {
+        // Header
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "Setup ${provider.displayName}",
+                style = MaterialTheme.typography.titleLarge,
+                color = Color.White
+            )
+
+            IconButton(onClick = onDismiss) {
+                Icon(
+                    imageVector = Icons.Default.Close,
+                    contentDescription = "Close",
+                    tint = Color.Gray
+                )
+            }
+        }
+
+        // Step 1: Get API Key
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(
+                text = "Step 1: Get Your API Key",
+                style = MaterialTheme.typography.titleSmall,
+                color = Color.White
+            )
+
+            Text(
+                text = provider.description,
+                style = MaterialTheme.typography.bodySmall,
+                color = Color.Gray
+            )
+
+            TextButton(
+                onClick = {
+                    val intent = Intent(Intent.ACTION_VIEW, Uri.parse(provider.apiKeyUrl))
+                    context.startActivity(intent)
+                }
+            ) {
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.OpenInNew,
+                    contentDescription = null,
+                    modifier = Modifier.size(16.dp)
+                )
+                Spacer(modifier = Modifier.width(4.dp))
+                Text("Get API Key")
+            }
+        }
+
+        // Step 2: Enter API Key
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(
+                text = "Step 2: Enter Your API Key",
+                style = MaterialTheme.typography.titleSmall,
+                color = Color.White
+            )
+
+            OutlinedTextField(
+                value = apiKey,
+                onValueChange = { apiKey = it },
+                modifier = Modifier.fillMaxWidth(),
+                placeholder = { Text("Paste your API key") },
+                visualTransformation = if (showKey) VisualTransformation.None else PasswordVisualTransformation(),
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                singleLine = true,
+                trailingIcon = {
+                    IconButton(onClick = { showKey = !showKey }) {
+                        Icon(
+                            imageVector = if (showKey) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                            contentDescription = if (showKey) "Hide" else "Show"
+                        )
+                    }
+                },
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedBorderColor = MaterialTheme.colorScheme.primary,
+                    unfocusedBorderColor = Color.Gray
+                )
+            )
+
+            if (error != null) {
+                Text(
+                    text = error,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error
+                )
+            }
+        }
+
+        // Save Button
+        Button(
+            onClick = { onSave(apiKey) },
+            modifier = Modifier.fillMaxWidth(),
+            enabled = apiKey.isNotBlank() && !isValidating
+        ) {
+            if (isValidating) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(20.dp),
+                    color = Color.White,
+                    strokeWidth = 2.dp
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text("Validating...")
+            } else {
+                Text("Validate & Save")
+            }
+        }
+
+        // Privacy note
+        Text(
+            text = "Your API key is stored securely on your device.",
+            style = MaterialTheme.typography.bodySmall,
+            color = Color.Gray,
+            modifier = Modifier.padding(bottom = 16.dp)
+        )
     }
 }
 

@@ -2,6 +2,9 @@ package com.bitacora.digital.model
 
 import com.bitacora.digital.util.formatDuration
 import com.bitacora.digital.util.formatRelativeDate
+import java.time.LocalDate
+import java.time.LocalDateTime
+import java.time.format.DateTimeFormatter
 
 /**
  * Recorded interview session.
@@ -41,6 +44,21 @@ data class Session(
     val typeDisplayName: String
         get() = getInterviewTypeInfo(interviewType, subcategory)?.label
             ?: interviewType.value.replaceFirstChar { it.uppercase() }
+
+    /**
+     * Parse createdAt string to LocalDateTime.
+     */
+    val createdAtDateTime: LocalDateTime
+        get() = try {
+            LocalDateTime.parse(createdAt, DateTimeFormatter.ISO_LOCAL_DATE_TIME)
+        } catch (_: Exception) {
+            LocalDateTime.now()
+        }
+
+    /**
+     * Parse createdAt string to LocalDate.
+     */
+    fun toLocalDate(): LocalDate = createdAtDateTime.toLocalDate()
 
     companion object {
         /**

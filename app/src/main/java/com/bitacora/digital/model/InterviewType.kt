@@ -12,9 +12,9 @@ import androidx.compose.ui.graphics.vector.ImageVector
  * Interview session types.
  */
 enum class InterviewType(val value: String, val displayName: String) {
-    MEMORY("memory", "Memory"),
+    MEMORY("memory", "Journal"),
     WILL("will", "Will"),
-    EXPERIENCE("experience", "Experience"),
+    EXPERIENCE("experience", "Story"),
     PRACTICE("practice", "Practice")
 }
 
@@ -43,8 +43,8 @@ data class InterviewTypeInfo(
 val interviewTypes: List<InterviewTypeInfo> = listOf(
     InterviewTypeInfo(
         type = InterviewType.MEMORY,
-        label = "Guided Memory",
-        description = "Capture cherished memories with guided prompts",
+        label = "Daily Journal",
+        description = "Capture daily moments and memories with guided prompts",
         icon = Icons.Default.Star
     ),
     InterviewTypeInfo(
@@ -55,8 +55,8 @@ val interviewTypes: List<InterviewTypeInfo> = listOf(
     ),
     InterviewTypeInfo(
         type = InterviewType.EXPERIENCE,
-        label = "Life Experience",
-        description = "Share significant life events and lessons",
+        label = "Story",
+        description = "Share any experience or story in your own words",
         icon = Icons.Default.Bookmark
     ),
     InterviewTypeInfo(
